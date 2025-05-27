@@ -1,0 +1,461 @@
+
+
+## SIMULATION ANALYSIS
+
+```{r}
+results <- read.csv("/home/student/Documents/aall-articles/comparison-study-pca-spca-efa/Lp_rot1129-main/simulation_results/full_results.csv")
+aggregated_results <- read.csv("/home/student/Documents/aall-articles/comparison-study-pca-spca-efa/Lp_rot1129-main/simulation_results/aggregated_results.csv")
+
+#results <- read.csv("/home/student/Documents/aall-articles/simulation-study-pca-spca-efa/simulation_final2/full_results.csv")
+#aggregated_results <- read.csv("/home/student/Documents/aall-articles/simulation-study-pca-spca-efa/simulation_final2/aggregated_results.csv")
+aggregated_results
+```
+
+```{r}
+library(dplyr)
+agg <- results %>%
+  group_by(method, alpha, n) %>%
+  summarise(
+    mean_mse = mean(mse, na.rm = TRUE),
+    se_mse = sd(mse, na.rm = TRUE) / sqrt(sum(!is.na(mse))),
+    .groups = "drop"
+  )
+agg
+```
+
+
+##RECONSTRUCTION ERROR
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(grid)
+
+agg <- agg %>%
+  mutate(line_type = ifelse(n == 100, "dotted", "solid"),
+         method = ifelse(method == "EFA", "EFA (Oblimin)", method),
+         method = ifelse(method == "PCA", "PCA (Varimax)", method),
+         method = ifelse(method == "Sparse PCA", "SPCA", method),
+         
+         )
+
+# Main plot
+p <- ggplot(agg, aes(
+  x = alpha, y = mean_mse,
+  color = method,
+  linetype = line_type,
+  group = interaction(method, n)
+)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = mean_mse - se_mse, ymax = mean_mse + se_mse), width = 0.03) +
+  scale_linetype_identity() +  
+  labs(
+    x = "Sparsity",
+    y = "MSE",
+    color = "Method"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.ticks = element_line(color = "black"),
+    axis.line = element_line(color = "black", size = 0.5)
+  )
+
+# Custom legend 
+final_plot <- p + annotation_custom(
+  grob = grobTree(
+    linesGrob(x = unit(c(0.1, 0.2), "npc"), y = unit(c(0.9, 0.9), "npc"),
+              gp = gpar(lwd = 2, lty = "dotted")),
+    textGrob("n = 100", x = unit(0.22, "npc"), y = unit(0.9, "npc"), hjust = 0, gp = gpar(cex = 0.8)),
+
+    linesGrob(x = unit(c(0.1, 0.2), "npc"), y = unit(c(0.83, 0.83), "npc"),
+              gp = gpar(lwd = 2, lty = "solid")),
+    textGrob("n = 500", x = unit(0.22, "npc"), y = unit(0.83, "npc"), hjust = 0, gp = gpar(cex = 0.8))
+  )
+)
+
+# Show the final plot
+print(final_plot)
+
+# Save the figure
+ggsave("/home/student/Documents/aimsessaytemplate/EssayTemplate_19-03-2025/Figures/reconstruction_error_plot.png", plot = final_plot, width = 9, height = 5, dpi = 300
+)
+
+
+```
+
+
+```{r}
+table(is.na(results$mse[results$method == "EFA" & results$n == 100 & results$p == 100]))
+
+```
+
+```{r}
+library(ggplot2)
+
+
+```
+
+
+
+
+### LOADING RECOVERY
+
+
+```{r}
+# Facet by alpha and sigma_sq
+library(ggplot2)
+library(dplyr)
+library(grid)  # Needed for custom annotations
+
+# Prepare data with corrected line type mapping
+library(ggplot2)
+library(dplyr)
+library(grid)
+
+# Prepare data
+plot_data <- results %>%
+  group_by(method, gamma, n) %>%
+  summarize(
+    mean_loading_error = mean(loading_error, na.rm = TRUE),
+    se_loading_error = sd(loading_error, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    n_label = factor(paste("n =", n), levels = c("n = 100", "n = 500")),
+    line_type = ifelse(n == 100, "dotted", "solid")
+  )
+
+# Base plot
+p <- ggplot(plot_data, aes(x = factor(gamma), y = mean_loading_error, 
+                           color = method, linetype = line_type)) +
+  geom_line(aes(group = interaction(method, n)), size = 0.8) +
+  geom_point(aes(shape = n_label), size = 2.5) +
+  geom_errorbar(aes(ymin = mean_loading_error - se_loading_error,
+                    ymax = mean_loading_error + se_loading_error),
+                width = 0.15, size = 0.5) +
+  scale_linetype_identity() +
+  scale_shape_manual(values = c(16, 17)) +
+  labs(
+    x = "Eigenvalue Decay Rate (γ)",
+    y = "Loading Error",
+    color = "Method"
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "serif"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    legend.position = "bottom",
+    axis.line = element_line(color = "black", size = 0.5),
+    axis.line.y.right = element_blank(),
+    axis.line.x.top = element_blank(),
+    aspect.ratio = 0.8
+  ) +
+  guides(
+    color = guide_legend(order = 1),
+    shape = "none"
+  )
+
+# Inset box at top-right
+inset <- grobTree(
+  rectGrob(x = unit(0.82, "npc"), y = unit(0.82, "npc"), 
+           width = unit(0.35, "npc"), height = unit(0.15, "npc"), 
+           gp = gpar(fill = "white", col = "black")),
+  linesGrob(x = unit(c(0.69, 0.79), "npc"), y = unit(0.88, "npc"),
+            gp = gpar(col = "black", lty = "dotted", lwd = 1.5)),
+  textGrob("n = 100", x = unit(0.80, "npc"), y = unit(0.88, "npc"), just = "left", gp = gpar(cex = 0.7)),
+
+  linesGrob(x = unit(c(0.69, 0.79), "npc"), y = unit(0.76, "npc"),
+            gp = gpar(col = "black", lty = "solid", lwd = 1.5)),
+  textGrob("n = 500", x = unit(0.80, "npc"), y = unit(0.76, "npc"), just = "left", gp = gpar(cex = 0.7))
+)
+
+# Combine plot and inset
+final_plot <- p + annotation_custom(inset)
+
+
+print(final_plot)
+```
+
+
+```{r}
+# Facet by alpha and sigma_sq
+library(ggplot2)
+library(dplyr)
+library(grid)  # Needed for custom annotations
+
+# Prepare data with corrected line type mapping
+library(ggplot2)
+library(dplyr)
+library(grid)
+
+# Prepare data
+
+plot_data <- results %>%
+  group_by(method, gamma, n) %>%
+  summarize(
+    mean_loading_error = mean(loading_error, na.rm = TRUE),
+    se_loading_error = sd(loading_error, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    method = ifelse(method == "EFA", "EFA (Oblimin)", method),
+    method = ifelse(method == "PCA", "PCA (Varimax)", method),
+    method = ifelse(method == "Sparse PCA", "SPCA", method),
+    n_label = factor(paste("n =", n), levels = c("n = 100", "n = 500")),
+    line_type = ifelse(n == 100, "dotted", "solid")
+  )
+# Base plot
+p <- ggplot(plot_data, aes(x = factor(gamma), y = mean_loading_error, 
+                           color = method, linetype = line_type)) +
+  geom_line(aes(group = interaction(method, n)), size = 0.8) +
+  geom_point(aes(shape = n_label), size = 2.5) +
+  geom_errorbar(aes(ymin = mean_loading_error - se_loading_error,
+                    ymax = mean_loading_error + se_loading_error),
+                width = 0.15, size = 0.5) +
+  scale_linetype_identity() +
+  scale_shape_manual(values = c(16, 17)) +
+  labs(
+    x = "Decay",
+    y = "Loading Error",
+    color = "Method"
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "serif"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    legend.position = "bottom",
+    axis.line = element_line(color = "black", size = 0.5),
+    axis.line.y.right = element_blank(),
+    axis.line.x.top = element_blank(),
+    aspect.ratio = 0.8
+  ) +
+  guides(
+    color = guide_legend(order = 1),
+    shape = "none"
+  )
+
+# Inset box at top-right
+inset <- grobTree(
+  rectGrob(x = unit(0.82, "npc"), y = unit(0.82, "npc"), 
+           width = unit(0.35, "npc"), height = unit(0.15, "npc"), 
+           gp = gpar(fill = "white", col = "black")),
+  linesGrob(x = unit(c(0.69, 0.79), "npc"), y = unit(0.88, "npc"),
+            gp = gpar(col = "black", lty = "dotted", lwd = 1.5)),
+  textGrob("n = 100", x = unit(0.80, "npc"), y = unit(0.88, "npc"), just = "left", gp = gpar(cex = 0.7)),
+
+  linesGrob(x = unit(c(0.69, 0.79), "npc"), y = unit(0.76, "npc"),
+            gp = gpar(col = "black", lty = "solid", lwd = 1.5)),
+  textGrob("n = 500", x = unit(0.80, "npc"), y = unit(0.76, "npc"), just = "left", gp = gpar(cex = 0.7))
+)
+
+# Combine plot and inset
+final_plot <- p + annotation_custom(inset)
+
+print(final_plot)
+# Save the plot
+ggsave("/home/student/Documents/aimsessaytemplate/EssayTemplate_19-03-2025/Figures/loading_recovery_plot.png", plot = final_plot, width = 9, height = 5, dpi = 300
+)
+
+```
+
+
+
+### correlation recovery
+```{r}
+
+library(ggplot2)
+
+ggplot(results, aes(x = method, y = mean_factor_score_cor, fill = method)) +
+  geom_boxplot() +
+  facet_wrap(~n, labeller = labeller(n = function(x) paste("n =", x))) +
+  labs(
+    #title = "Factor Score Correlation by Method and Sample Size",
+    x = "Method",
+    y = "Mean Factor Score Correlation",
+    fill = "Method"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),   # Remove major grid lines
+    panel.grid.minor = element_blank(),   # Remove minor grid lines
+    axis.line = element_line(color = "black", size = 0.5),  # Add axis lines
+    axis.ticks = element_line(color = "black"),             # Add tick marks
+    strip.text = element_text(face = "bold"),               # Optional: bold facet labels
+    plot.title = element_text(hjust = 0.5, face = "bold")   # Center and bold title
+  )
+
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Relabel method names
+results_plot <- results %>%
+  mutate(method = ifelse(method == "EFA", "EFA (Oblimin)", method),
+         method = ifelse(method == "PCA", "PCA (Varimax)", method),
+         method = ifelse(method == "Sparse PCA", "SPCA", method))
+
+mean_factor_score_correlation<- ggplot(results_plot, aes(x = method, y = mean_factor_score_cor, fill = method)) +
+  geom_boxplot() +
+  facet_wrap(~n, labeller = labeller(n = function(x) paste("n =", x))) +
+  labs(
+    x = "Method",
+    y = "Mean factor score correlation",
+    fill = "Method"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black", size = 0.5),
+    axis.ticks.x = element_blank(),          # Remove x-axis tick marks
+    axis.text.x = element_blank(),           # Remove x-axis labels
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+print(mean_factor_score_correlation)
+ggsave("/home/student/Documents/aimsessaytemplate/EssayTemplate_19-03-2025/Figures/mean_factor_score_correlation_plot.png", plot = mean_factor_score_correlation, width = 9, height = 5, dpi = 300
+)
+  
+
+```
+
+## FPR/FNR
+
+```{r}
+#results <- read.csv("/home/student/Documents/aall-articles/comparison-study-pca-spca-efa/Lp_rot1129-main/simulation_results/full_results.csv")
+results <- read.csv("D:/AIMS-ESSAY-BLOCK/articles/simulation-study-pca-spca-efa/full_results_100.csv")
+aggregated_results <- read.csv("D:/AIMS-ESSAY-BLOCK/articles/simulation-study-pca-spca-efa/aggregated_results_100.csv")
+aggregated_results
+
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+
+# 1. Filter and aggregate data
+selected_methods <- c("PCA", "Sparse PCA (Fixed)", "EFA (varimax)", "EFA (oblimin)")
+
+aggregated_results <- results %>%
+  filter(
+    m == 5, 
+    gamma == 1, 
+    sigma_sq == 1, 
+    n %in% c(100, 500),
+    method %in% selected_methods
+  ) %>%
+  group_by(method, n, alpha) %>%
+  summarise(
+    mean_fpr = mean(false_positive_rate, na.rm = TRUE),
+    se_fpr = sd(false_positive_rate, na.rm = TRUE)/sqrt(n()),
+    mean_fnr = mean(false_negative_rate, na.rm = TRUE),
+    se_fnr = sd(false_negative_rate, na.rm = TRUE)/sqrt(n()),
+    .groups = "drop"
+  )
+
+# 2. Define custom colors AND readable names
+method_settings <- list(
+  colors = c(
+    "PCA" = "#FF0000",          # Red
+    "Sparse PCA (Fixed)" = "#00A08A", # Teal
+    "EFA (varimax)" = "#F2AD00", # Gold
+    "EFA (oblimin)" = "#5BBCD6"  # Sky blue
+  ),
+  labels = c(
+    "PCA" = "PCA (Varimax)",
+    "Sparse PCA (Fixed)" = "Sparse PCA", 
+    "EFA (varimax)" = "EFA (Regularized)",
+    "EFA (oblimin)" = "EFA (Oblimin)"
+  )
+)
+
+# 3. Enhanced plotting function
+plot_error_rates <- function(data, y_var, y_se_var, title) {
+  ggplot(data, aes(
+    x = alpha,
+    y = .data[[y_var]],
+    color = method,
+    linetype = factor(n)
+  )) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.5, aes(shape = method)) +
+    geom_errorbar(
+      aes(ymin = .data[[y_var]] - .data[[y_se_var]],
+          ymax = .data[[y_var]] + .data[[y_se_var]]),
+      width = 0.02,
+      linewidth = 0.2
+    ) +
+    scale_color_manual(
+      values = method_settings$colors,
+      labels = method_settings$labels
+    ) +
+    scale_shape_manual(
+      values = c(16, 17, 15, 18),  # Different shapes for methods
+      labels = method_settings$labels
+    ) +
+    scale_linetype_manual(
+      values = c("100" = "dotted", "500" = "solid"),
+      labels = c("100" = "n = 100", "500" = "n = 500")
+    ) +
+    labs(
+      x = "Sparsity (α)",
+      y = ifelse(grepl("fpr", y_var), "False Positive Rate", "False Negative Rate"),
+      title = title,
+      color = "Method",
+      shape = "Method",
+      linetype = "Sample Size"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "bottom",
+      legend.box = "vertical",
+      legend.spacing = unit(0.5, "cm"),
+      plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+      #axis.title = element_text(face = "bold"),
+      panel.grid.major = element_line(color = "grey90"),
+      panel.grid.minor = element_blank()
+    ) +
+    guides(
+      color = guide_legend(order = 1, nrow = 2),
+      shape = guide_legend(order = 1, nrow = 2),
+      linetype = guide_legend(order = 2)
+    )
+}
+
+# 4. Generate plots with consistent scales
+fpr_plot <- plot_error_rates(
+  aggregated_results,
+  "mean_fpr", "se_fpr",
+  "False Positive Rate by Sparsity"
+) + ylim(0, 1)
+
+fnr_plot <- plot_error_rates(
+  aggregated_results,
+  "mean_fnr", "se_fnr",
+  "False Negative Rate by Sparsity"
+) + ylim(0, 1)
+
+# 5. Combine plots with aligned legends
+final_plot <- (fpr_plot + fnr_plot) + 
+  plot_layout(ncol = 2, guides = "collect") &
+  theme(legend.position = "bottom")
+
+# 6. Display and save
+final_plot
+ggsave(
+  "D:/AIMS-ESSAY-BLOCK/articles/simulation-study-pca-spca-efa/simulation_plot/reconstruction_error_sparsity100.png", 
+  plot = final_plot, width = 9, height = 5, dpi = 300
+)
+```
+
+
+

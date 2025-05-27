@@ -1,0 +1,1443 @@
+```{r}
+####################################################
+# Empirical Application: Comparing PCA, Sparse PCA, and EFA 
+# on Big Five Personality Data
+####################################################
+
+# Install and load required packages
+required_packages <- c("psych", "GPArotation", "elasticnet", "ggplot2", 
+                      "reshape2", "gridExtra", "corpcor", "RSpectra")
+library(qgraph) 
+# Function to install packages if not already installed
+for (pkg in required_packages) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    install.packages(pkg)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+set.seed(12345) # Set seed for reproducibility
+
+
+```
+
+
+```{r}
+data(big5)  # Reload original big5 dataset
+if (!is.data.frame(big5)) big5 <- as.data.frame(big5)  # Ensure data frame
+# Check for missing values
+if (any(is.na(big5))) stop("Missing values detected; handle before proceeding")
+
+# Create facet-level composites by averaging items (assuming 8 items per facet, 48 items per trait)
+facets <- list(
+  N = split(names(big5)[1:48], rep(1:6, each = 8)),  # Neuroticism facets
+  E = split(names(big5)[49:96], rep(1:6, each = 8)),  # Extraversion facets
+  O = split(names(big5)[97:144], rep(1:6, each = 8)), # Openness facets
+  A = split(names(big5)[145:192], rep(1:6, each = 8)), # Agreeableness facets
+  C = split(names(big5)[193:240], rep(1:6, each = 8))  # Conscientiousness facets
+)
+big5_facets <- data.frame(matrix(NA, nrow = nrow(big5), ncol = 30))
+colnames(big5_facets) <- paste0(rep(c("N", "E", "O", "A", "C"), each = 6), "_Facet", 1:6)
+for (trait in c("N", "E", "O", "A", "C")) {
+  for (i in 1:6) {
+    facet_items <- facets[[trait]][[i]]
+    big5_facets[, paste0(trait, "_Facet", i)] <- rowMeans(big5[, facet_items], na.rm = TRUE)
+  }
+}
+```
+
+
+```{r}
+dim(big5_facets)
+```
+
+
+```{r}
+# Standardize the facet-level data
+big5_facets <- scale(big5_facets, center = TRUE, scale = TRUE)
+if (any(is.na(big5_facets))) stop("NA values in standardized facets; check data")
+```
+
+
+```{r}
+bfi_scaled <- big5_facets
+#bfi_scaled
+item_names <- colnames(big5_facets)
+print(item_names)
+```
+
+
+
+```{r}
+# Save column names for later reference
+item_names <- colnames(big5_facets)
+
+# Print basic summary statistics
+cat("Dataset dimensions:", dim(bfi_scaled)[1], "observations,", 
+    dim(bfi_scaled)[2], "variables\n\n")
+cat("Variable names:", paste(item_names, collapse=", "), "\n\n")
+
+# Examine correlation matrix
+correlation_matrix <- cor(bfi_scaled)
+cat("Correlation matrix summary:\n")
+print(summary(as.vector(correlation_matrix[upper.tri(correlation_matrix)])))
+
+```
+
+```{r}
+#############################################
+# 1. PCA + Varimax
+#############################################
+
+pca_result <- prcomp(bfi_scaled, scale. = FALSE)  # Data already scaled
+
+# Scree plot to determine number of components
+eigenvalues <- pca_result$sdev^2
+variance_explained <- eigenvalues / sum(eigenvalues)
+cum_variance <- cumsum(variance_explained)
+
+# Number of factors to extract (typically 5 for Big Five)
+n_factors <- 5
+
+# Extract PCA loadings with varimax rotation
+# Extract loadings from first n_factors components
+pca_loadings <- pca_result$rotation[, 1:n_factors]
+
+# Apply varimax rotation
+pca_varimax <- varimax(pca_loadings)
+pca_varimax_loadings <- pca_varimax$loadings
+
+# Display rotated loadings
+print(round(pca_varimax_loadings, 3))
+
+# Calculate component scores
+pca_scores <- scale(bfi_scaled) %*% pca_loadings
+
+# Calculate reconstruction error
+pca_recon <- pca_scores %*% t(pca_loadings)
+pca_mse <- mean((bfi_scaled - pca_recon)^2)
+cat("PCA reconstruction MSE:", pca_mse, "\n")
+```
+
+```{r}
+
+#############################################
+# 3. SPARSE PCA 
+#############################################
+
+# Compute Correlation Matrix 
+cor_matrix <- cor(bfi_scaled)  # or cov(bfi_scaled) for covariance
+
+# Function to perform Sparse PCA with cross-validation
+tune_sparse_pca <- function(X, K = 5, lambda_grid = seq(0.01, 0.1, by = 0.01), 
+                             n_folds = 5, threshold = 0.3) {
+  # Prepare data and parameters
+  n <- nrow(X)
+  p <- ncol(X)
+  
+  # Create fold indices
+  set.seed(123)
+  fold_indices <- sample(rep(1:n_folds, length.out = n))
+  
+  # Store cross-validation results
+  cv_results <- data.frame(
+    lambda = lambda_grid,
+    mean_mse = NA,
+    sd_mse = NA,
+    sparsity = NA
+  )
+  
+  # Cross-validation loop
+  for (i in seq_along(lambda_grid)) {
+    lambda <- lambda_grid[i]
+    mse_folds <- numeric(n_folds)
+    
+    for (fold in 1:n_folds) {
+      # Split data
+      train_idx <- which(fold_indices != fold)
+      test_idx <- which(fold_indices == fold)
+      
+      X_train <- X[train_idx, ]
+      X_test <- X[test_idx, ]
+      
+      # Perform Sparse PCA on training data
+      spca_result <- elasticnet::spca(
+        x = cor(X_train), 
+        K = K,
+        para = rep(lambda, p),
+        type = "Gram",
+        sparse = "penalty"
+      )
+      
+      # Clean loadings
+      loadings <- spca_result$loadings
+      loadings[abs(loadings) < threshold] <- 0
+      
+      # Calculate scores and reconstruction
+      scores_train <- X_train %*% loadings
+      recon_train <- scores_train %*% t(loadings)
+      
+      # Evaluate on test data
+      scores_test <- X_test %*% loadings
+      recon_test <- scores_test %*% t(loadings)
+      
+      # Calculate MSE
+      mse_folds[fold] <- mean((X_test - recon_test)^2)
+    }
+    
+    # Store cross-validation results
+    cv_results$mean_mse[i] <- mean(mse_folds)
+    cv_results$sd_mse[i] <- sd(mse_folds)
+    
+    # Calculate sparsity (proportion of zero loadings)
+    temp_result <- elasticnet::spca(
+      x = cor(X), 
+      K = K,
+      para = rep(lambda, p),
+      type = "Gram",
+      sparse = "penalty"
+    )
+    loadings <- temp_result$loadings
+    loadings[abs(loadings) < threshold] <- 0
+    cv_results$sparsity[i] <- mean(abs(loadings) == 0)
+  }
+  
+  # Find optimal lambda 
+  cv_results$score <- cv_results$mean_mse + 
+    0.1 * cv_results$sd_mse + 
+    0.5 * cv_results$sparsity
+  
+  optimal_lambda <- cv_results$lambda[which.min(cv_results$score)]
+  
+  # Visualize cross-validation results
+  par(mfrow = c(2, 1), mar = c(4, 4, 2, 1))
+  
+  # MSE plot
+  plot(cv_results$lambda, cv_results$mean_mse, 
+       type = "b", col = "blue",
+       xlab = "Lambda", ylab = "Mean Squared Error",
+       main = "Cross-Validation: Reconstruction Error")
+  arrows(cv_results$lambda, 
+         cv_results$mean_mse - cv_results$sd_mse,
+         cv_results$lambda, 
+         cv_results$mean_mse + cv_results$sd_mse, 
+         length = 0.1, angle = 90, code = 3, col = "red")
+  
+  # Sparsity plot
+  plot(cv_results$lambda, cv_results$sparsity, 
+       type = "b", col = "green",
+       xlab = "Lambda", ylab = "Proportion of Zero Loadings",
+       main = "Cross-Validation: Sparsity")
+  
+  # Perform Sparse PCA with optimal lambda
+  spca_result <- elasticnet::spca(
+    x = cor(X), 
+    K = K,
+    para = rep(optimal_lambda, p),
+    type = "Gram",
+    sparse = "penalty"
+  )
+  
+  # Clean loadings
+  loadings <- spca_result$loadings
+  loadings[abs(loadings) < threshold] <- 0
+  
+  # Return results
+  return(list(
+    optimal_lambda = optimal_lambda,
+    cv_results = cv_results,
+    loadings = loadings,
+    spca_result = spca_result
+  ))
+}
+
+# Apply the tuning function
+sparse_pca_tuning <- tune_sparse_pca(
+  X = bfi_scaled, 
+  K = 5,  # Number of factors
+  lambda_grid = seq(0.05, 0.5, by = 0.05),
+  n_folds = 5,
+  threshold = 0.3
+)
+
+# Extract results
+optimal_lambda <- sparse_pca_tuning$optimal_lambda
+spca_loadings <- sparse_pca_tuning$loadings
+spca_result <- sparse_pca_tuning$spca_result
+
+# Print cross-validation results
+cat("Optimal Lambda:", optimal_lambda, "\n")
+print(sparse_pca_tuning$cv_results)
+
+# --- EVALUATION METRICS ---
+# Sparsity
+spca_nonzero <- mean(abs(spca_loadings) > 0.1)  # Proportion of non-trivial loadings
+cat("Sparsity (proportion of |loadings| > 0.1):", round(spca_nonzero, 3), "\n")
+
+# Reconstruction error
+spca_scores <- bfi_scaled %*% spca_loadings
+spca_recon <- spca_scores %*% t(spca_loadings)
+spca_mse <- mean((bfi_scaled - spca_recon)^2)
+cat("Reconstruction MSE:", round(spca_mse, 5), "\n")
+
+# --- DISPLAY LOADINGS ---
+cat("Sparse PCA loadings (optimal lambda =", optimal_lambda, "):\n")
+print(round(spca_loadings, 3))
+
+
+```
+
+
+#########################skip#######################
+
+```{r}
+#############################################
+# 3. SPARSE PCA (MANUAL PARAMETER TUNING)
+#############################################
+
+# --- SET MANUAL PARAMETERS ---
+# Final model with lambda=0.3
+lambda <- 0.1
+spca_result  <- elasticnet::spca(
+  x = cor(bfi_scaled), 
+  K = 5,
+  para = rep(lambda, ncol(bfi_scaled)),
+  type = "Gram",
+  sparse = "penalty"
+)
+
+# Print clean loadings (threshold at |0.3|)
+spca_loadings  <- spca_result $loadings
+spca_loadings [abs(spca_loadings ) < 0.3] <- 0
+#print(round(spca_loadings , 2))
+
+# --- EXTRACT RESULTS ---
+spca_loadings <- spca_result$loadings
+spca_scores <- bfi_scaled %*% spca_loadings
+
+# --- EVALUATION METRICS ---
+# Sparsity
+spca_nonzero <- mean(abs(spca_loadings) > 0.1)  # Proportion of non-trivial loadings
+cat("Sparsity (proportion of |loadings| > 0.1):", round(spca_nonzero, 3), "\n")
+
+# Reconstruction error
+spca_recon <- spca_scores %*% t(spca_loadings)
+spca_mse <- mean((bfi_scaled - spca_recon)^2)
+cat("Reconstruction MSE:", round(spca_mse, 5), "\n")
+
+# --- DISPLAY LOADINGS ---
+cat("Sparse PCA loadings (lambda =", lambda, "):\n")
+print(round(spca_loadings, 3))
+
+# --- HOW TO ADJUST LAMBDA MANUALLY ---
+# 1. If loadings are TOO DENSE (many small values), INCREASE lambda (e.g., 0.2, 0.3)
+# 2. If loadings are TOO SPARSE (too many zeros), DECREASE lambda (e.g., 0.05, 0.01)
+# 3. Re-run with new lambda until you get interpretable results.
+```
+
+
+
+```{r}
+#############################################
+# 4. EXPLORATORY FACTOR ANALYSIS (EFA)
+#############################################
+
+# 4.1 EFA with Maximum Likelihood Estimation and Varimax rotation
+efa_varimax <- fa(bfi_scaled, nfactors = n_factors, rotate = "varimax", 
+                 fm = "ml", scores = "regression")
+
+cat("EFA with Varimax rotation:\n")
+print(round(efa_varimax$loadings, 3))
+
+# Calculate reconstruction error
+efa_varimax_recon <- efa_varimax$scores %*% t(efa_varimax$loadings)
+efa_varimax_mse <- mean((bfi_scaled - efa_varimax_recon)^2)
+cat("EFA (Varimax) reconstruction MSE:", efa_varimax_mse, "\n")
+
+# 4.2 EFA with Maximum Likelihood Estimation and Oblimin rotation
+efa_oblimin <- fa(bfi_scaled, nfactors = n_factors, rotate = "oblimin", 
+                 fm = "ml", scores = "regression")
+
+cat("EFA with Oblimin rotation:\n")
+print(round(efa_oblimin$loadings, 3))
+
+# Calculate factor correlations for oblimin
+cat("Factor correlations (Oblimin):\n")
+print(round(efa_oblimin$Phi, 3))  # Factor correlation matrix
+
+# Calculate reconstruction error
+efa_oblimin_recon <- efa_oblimin$scores %*% t(efa_oblimin$loadings)
+efa_oblimin_mse <- mean((bfi_scaled - efa_oblimin_recon)^2)
+cat("EFA (Oblimin) reconstruction MSE:", efa_oblimin_mse, "\n")
+
+efa_varimax_loadings <- efa_varimax$loadings
+efa_oblimin_loadings <- efa_oblimin$loadings
+
+
+```
+
+##efa oblimin factor loadings
+
+```{r}
+library(dplyr)
+library(tibble)
+library(flextable)
+
+# Extract loadings matrix and convert to numeric matrix
+loadings_mat <- as.matrix(efa_oblimin$loadings)
+
+# Set cutoff for suppressing small loadings (e.g., < 0.3)
+cutoff <- 0.3
+
+# Round loadings and suppress small ones
+loadings_clean <- round(loadings_mat, 3)
+loadings_clean[abs(loadings_clean) < cutoff] <- NA
+
+# Convert to data frame and add item names as a column
+loadings_df <- as.data.frame(loadings_clean) %>%
+  rownames_to_column(var = "Item")
+
+# Add communality, uniqueness, and complexity for each item
+loadings_df$Communality <- round(efa_oblimin$communality, 3)
+loadings_df$Uniqueness <- round(efa_oblimin$uniquenesses, 3)
+loadings_df$Complexity <- round(efa_oblimin$complexity, 3)
+
+# Create a flextable for nice formatting
+ft <- flextable(loadings_df) %>%
+  set_caption("Factor Loadings from EFA with Oblimin Rotation") %>%
+  autofit() %>%
+  theme_zebra() %>%
+  align(j = 2:ncol(loadings_df), align = "center", part = "all")
+
+# Print table in RStudio Viewer or RMarkdown
+ft
+
+# Optional: Save as Word document
+# save_as_docx(ft, path = "efa_oblimin_factor_loadings.docx")
+
+# Print factor correlation matrix (Phi)
+cat("Factor Correlation Matrix (Oblimin):\n")
+print(round(efa_oblimin$Phi, 3))
+
+# Print reconstruction error
+cat("EFA (Oblimin) Reconstruction MSE:\n")
+print(round(efa_oblimin_mse, 5))
+
+```
+
+
+```{r}
+############################################
+# 5. SIMPLIFIED L1-REGULARIZED EFA (LASSO)
+############################################
+# Load required packages
+if (!require("psych")) install.packages("psych")
+if (!require("glmnet")) install.packages("glmnet")
+library(psych)
+library(glmnet)
+
+bfi_matrix <- as.matrix(bfi_scaled)  # Ensure we're working with a matrix
+n_factors <- 5  # For Big Five personality traits
+# 1. First perform standard EFA to get initial loadings
+efa_init <- fa(bfi_matrix, nfactors = n_factors, rotate = "none", fm = "ml")
+init_loadings <- efa_init$loadings
+
+# 2. Robust regularized EFA function
+robust_regularized_efa <- function(data, n_factors, lambda = 0.1) {
+  # Ensure data is properly scaled
+  data_scaled <- scale(data)
+  
+  # Initialize loadings matrix
+  reg_loadings <- matrix(0, nrow = ncol(data_scaled), ncol = n_factors)
+  rownames(reg_loadings) <- colnames(data_scaled)
+  colnames(reg_loadings) <- paste0("F", 1:n_factors)
+  
+  # Apply LASSO to each factor
+  for (f in 1:n_factors) {
+    # Use tryCatch for error handling
+    tryCatch({
+      fit <- glmnet(diag(ncol(data_scaled)), 
+                   init_loadings[, f], 
+                   alpha = 1, 
+                   lambda = lambda,
+                   intercept = FALSE)
+      
+      reg_loadings[, f] <- as.numeric(coef(fit))[-1]  # Remove intercept
+    }, error = function(e) {
+      warning(paste("Factor", f, "LASSO failed:", e$message))
+      reg_loadings[, f] <- init_loadings[, f]  # Fall back to initial loadings
+    })
+  }
+  
+  # Handle any NA/NaN values
+  reg_loadings[is.na(reg_loadings)] <- 0
+  
+  # Apply rotation with error handling
+  rotated <- tryCatch({
+    varimax(reg_loadings)
+  }, error = function(e) {
+    warning("Rotation failed, returning unrotated solution")
+    list(loadings = reg_loadings)
+  })
+  
+  # Calculate scores safely
+  tryCatch({
+    ridge_penalty <- diag(n_factors) * 1e-5
+    inv_matrix <- solve(t(rotated$loadings) %*% rotated$loadings + ridge_penalty)
+    scores <- data_scaled %*% rotated$loadings %*% inv_matrix
+    list(loadings = rotated$loadings, scores = scores)
+  }, error = function(e) {
+    warning("Score calculation failed, returning only loadings")
+    list(loadings = rotated$loadings)
+  })
+}
+
+# 3. Find optimal lambda with error handling
+find_optimal_lambda <- function(data, n_factors, 
+                               lambda_seq = exp(seq(-6, 0, length.out = 10))) {
+  mse_values <- rep(NA, length(lambda_seq))
+  
+  for (i in seq_along(lambda_seq)) {
+    lambda <- lambda_seq[i]
+    cat("Trying lambda =", lambda, "...")
+    
+    result <- tryCatch({
+      robust_regularized_efa(data, n_factors, lambda)
+    }, error = function(e) {
+      warning(paste("Failed for lambda =", lambda, ":", e$message))
+      NULL
+    })
+    
+    if (!is.null(result) && !is.null(result$scores)) {
+      recon <- result$scores %*% t(result$loadings)
+      mse_values[i] <- mean((scale(data) - recon)^2, na.rm = TRUE)
+      cat("MSE =", mse_values[i], "\n")
+    } else {
+      cat("Failed\n")
+    }
+  }
+  
+  # Find best lambda (excluding NAs)
+  if (all(is.na(mse_values))) {
+    warning("All lambda values failed, using default 0.1")
+    return(list(optimal_lambda = 0.1, lambda_seq = lambda_seq, mse_values = mse_values))
+  }
+  
+  optimal_lambda <- lambda_seq[which.min(mse_values)]
+  list(optimal_lambda = optimal_lambda, 
+       lambda_seq = lambda_seq,
+       mse_values = mse_values)
+}
+
+# 4. Run the analysis with error handling
+set.seed(123)
+tryCatch({
+  lambda_results <- find_optimal_lambda(bfi_matrix, n_factors)
+  print(lambda_results)
+  
+  # Fit final model
+  final_model <- robust_regularized_efa(bfi_matrix, n_factors,
+                                      lambda_results$optimal_lambda)
+  
+  # Print results
+  cat("\nFinal Regularized Loadings:\n")
+  print(round(final_model$loadings, 3))
+  
+}, error = function(e) {
+  cat("Analysis failed with error:", e$message, "\n")
+  cat("Trying fallback solution...\n")
+  
+  # Fallback: simple thresholding
+  efa_simple <- fa(bfi_matrix, nfactors = n_factors, rotate = "varimax")
+  efa_simple$loadings[abs(efa_simple$loadings) < 0.3] <- 0
+  print(round(efa_simple$loadings, 3))
+})
+
+
+       
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+efa_reg_loadings <- final_model$loadings
+efa_reg_loadings
+#print(round(final_model$loadings, 3))
+```
+
+###efa_reg_loadings, efa_oblimin_loadings
+
+```{r}
+ 
+library(clue)
+library(reshape2)
+library(ggplot2)
+
+# Function to compute congruence coefficients (Tucker's phi)
+compute_congruence_matrix <- function(efa_reg_loadings, efa_oblimin_loadings) {
+  efa_reg_loadings <- as.matrix(efa_reg_loadings)
+  efa_oblimin_loadings <- as.matrix(efa_oblimin_loadings)
+  
+  if (nrow(efa_reg_loadings) != nrow(efa_oblimin_loadings)) {
+    stop("EFA Oblimin and SPCA loadings must have the same number of variables (rows).")
+  }
+  
+  n_efa <- ncol(efa_reg_loadings)
+  n_spca <- ncol(efa_oblimin_loadings)
+  congruence_matrix <- matrix(NA, nrow = n_efa, ncol = n_spca)
+  
+  for (i in 1:n_efa) {
+    for (j in 1:n_spca) {
+      efa_factor <- efa_reg_loadings[, i]
+      spca_factor <- efa_oblimin_loadings[, j]
+      
+      numerator <- sum(efa_factor * spca_factor)
+      denominator <- sqrt(sum(efa_factor^2)) * sqrt(sum(spca_factor^2))
+      congruence_matrix[i, j] <- numerator / denominator
+    }
+  }
+  
+  rownames(congruence_matrix) <- paste0("F_", 1:n_efa)
+  colnames(congruence_matrix) <- paste0("C_", 1:n_spca)
+  
+  return(congruence_matrix)
+}
+
+# Compute congruence matrix between EFA Oblimin and SPCA loadings
+regefa_spca_congruence_matrix <- compute_congruence_matrix(efa_reg_loadings, efa_oblimin_loadings)
+
+# Print original congruence matrix rounded
+cat("Original Congruence Matrix (EFA Oblimin vs SPCA):\n")
+print(round(regefa_spca_congruence_matrix, 2))
+
+# Use absolute values for matching (ignore sign)
+abs_congruence <- abs(regefa_spca_congruence_matrix)
+
+# Hungarian algorithm for optimal matching
+assignment <- solve_LSAP(abs_congruence, maximum = TRUE)
+
+# Print assignment vector (which SPCA component matches each EFA factor)
+cat("\nOptimal matching of SPCA components to EFA Oblimin factors:\n")
+print(assignment)
+
+# Reorder columns of congruence matrix according to assignment
+congruence_matrix_reordered <- regefa_spca_congruence_matrix[, assignment]
+
+# Rename columns to reflect reordered SPCA components
+colnames(congruence_matrix_reordered) <- paste0("C_", assignment)
+
+# Print reordered congruence matrix rounded
+cat("\nReordered Congruence Matrix (Optimal Matching):\n")
+print(round(congruence_matrix_reordered, 2))
+
+# Melt for ggplot2
+congruence_df <- melt(abs(congruence_matrix_reordered))  # Use abs for heatmap colors
+colnames(congruence_df) <- c("EFA_Oblimin_Factor", "SPCA_Component", "Abs_Congruence")
+
+# Plot heatmap
+ggplot(congruence_df, aes(x = SPCA_Component, y = EFA_Oblimin_Factor, fill = Abs_Congruence)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient(low = "white", high = "red", limits = c(0, 1), name = "Absolute Congruence") +
+  geom_text(aes(label = round(Abs_Congruence, 2)), size = 4, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "EFA Oblimin vs Sparse PCA Congruence Coefficients",
+       x = "SPCA Components",
+       y = "EFA Oblimin Factors")
+
+
+```
+
+
+
+```{r}
+
+ 
+```
+
+#################CONGRUENCE SIMILARITY####################
+
+#######PCA_VARIMAX AND EFA_OBLIMIN##############
+
+```{r}
+
+library(clue)
+library(reshape2)
+library(ggplot2)
+
+# Function to compute congruence matrix (Tucker's phi)
+compute_congruence_matrix <- function(efa_oblimin_loadings, pca_varimax_loadings) {
+  efa_oblimin_loadings <- as.matrix(efa_oblimin_loadings)
+  pca_varimax_loadings <- as.matrix(pca_varimax_loadings)
+  
+  if (nrow(efa_oblimin_loadings) != nrow(pca_varimax_loadings)) {
+    stop("EFA and PCA loadings must have the same number of variables (rows).")
+  }
+  
+  n_efa <- ncol(efa_oblimin_loadings)
+  n_pca <- ncol(pca_varimax_loadings)
+  congruence_matrix <- matrix(NA, nrow = n_efa, ncol = n_pca)
+  
+  for (i in 1:n_efa) {
+    for (j in 1:n_pca) {
+      efa_factor <- efa_oblimin_loadings[, i]
+      pca_factor <- pca_varimax_loadings[, j]
+      
+      numerator <- sum(efa_factor * pca_factor)
+      denominator <- sqrt(sum(efa_factor^2)) * sqrt(sum(pca_factor^2))
+      congruence_matrix[i, j] <- numerator / denominator
+    }
+  }
+  
+  rownames(congruence_matrix) <- paste0("F_", 1:n_efa)
+  colnames(congruence_matrix) <- paste0("C_", 1:n_pca)
+  
+  return(congruence_matrix)
+}
+
+# Compute the congruence matrix
+pca_oblimin_congruence_matrix <- compute_congruence_matrix(efa_oblimin_loadings, pca_varimax_loadings)
+
+cat("Original Congruence Matrix (with signs):\n")
+print(round(pca_oblimin_congruence_matrix, 2))
+
+# Use absolute values for matching
+abs_congruence <- abs(pca_oblimin_congruence_matrix)
+
+# Hungarian algorithm for optimal matching
+assignment <- solve_LSAP(abs_congruence, maximum = TRUE)
+
+# Reorder columns of congruence matrix according to assignment
+pca_oblimin_congruence_matrix_reordered <- pca_oblimin_congruence_matrix[, assignment]
+
+# Rename columns to reflect reordered PCA components
+colnames(pca_oblimin_congruence_matrix_reordered) <- paste0("C_", assignment)
+
+cat("\nReordered Congruence Matrix (Optimal Matching, original signs):\n")
+print(round(pca_oblimin_congruence_matrix_reordered, 2))
+
+# Prepare data for heatmap: use absolute values for color and labels (ignore sign)
+congruence_df <- melt(abs(pca_oblimin_congruence_matrix_reordered))
+colnames(congruence_df) <- c("EFA_Oblimin_Factor", "PCA_Varimax_Factor", "Abs_Congruence")
+
+# Create heatmap with absolute congruence values
+ggplot(congruence_df, aes(x = PCA_Varimax_Factor, y = EFA_Oblimin_Factor, fill = Abs_Congruence)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient(low = "white", high = "red", limits = c(0, 1), name = "Absolute Congruence") +
+  geom_text(aes(label = round(Abs_Congruence, 2)), size = 4, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "EFA Oblimin vs PCA Varimax Congruence Coefficients",
+       x = "PCA Varimax Factors",
+       y = "EFA Oblimin Factors")
+```
+
+
+```{r}
+congruence_oblimin_pca <- ggplot(congruence_df, aes(x = PCA_Varimax_Factor, y = EFA_Oblimin_Factor, fill = Abs_Congruence)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient(low = "white", high = "red", limits = c(0, 1), name = "Absolute Congruence") +
+  geom_text(aes(label = round(Abs_Congruence, 2)), size = 4, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(#title = "EFA Oblimin vs PCA Varimax Congruence Coefficients",
+       x = "PCA (Varimax) Components",
+       y = "EFA (Oblimin) Factors")
+print(congruence_oblimin_pca)
+ggsave("D:/AIMS-ESSAY-BLOCK/articles/simulation-study-pca-spca-efa/big-five-data/plots/congruence_oblimin_pca2.png", plot = congruence_oblimin_pca, width = 7, height = 5, dpi = 300)
+
+```
+
+
+################EFA_OBLIMIN VS SPCA
+
+```{r}
+spca_loadings <- sparse_pca_tuning$loadings
+```
+
+
+```{r}
+library(clue)
+library(reshape2)
+library(ggplot2)
+
+# Function to compute congruence coefficients (Tucker's phi)
+compute_congruence_matrix <- function(efa_oblimin_loadings, spca_loadings) {
+  efa_oblimin_loadings <- as.matrix(efa_oblimin_loadings)
+  spca_loadings <- as.matrix(spca_loadings)
+  
+  if (nrow(efa_oblimin_loadings) != nrow(spca_loadings)) {
+    stop("EFA Oblimin and SPCA loadings must have the same number of variables (rows).")
+  }
+  
+  n_efa <- ncol(efa_oblimin_loadings)
+  n_spca <- ncol(spca_loadings)
+  congruence_matrix <- matrix(NA, nrow = n_efa, ncol = n_spca)
+  
+  for (i in 1:n_efa) {
+    for (j in 1:n_spca) {
+      efa_factor <- efa_oblimin_loadings[, i]
+      spca_factor <- spca_loadings[, j]
+      
+      numerator <- sum(efa_factor * spca_factor)
+      denominator <- sqrt(sum(efa_factor^2)) * sqrt(sum(spca_factor^2))
+      congruence_matrix[i, j] <- numerator / denominator
+    }
+  }
+  
+  rownames(congruence_matrix) <- paste0("F_", 1:n_efa)
+  colnames(congruence_matrix) <- paste0("C_", 1:n_spca)
+  
+  return(congruence_matrix)
+}
+
+# Compute congruence matrix between EFA Oblimin and SPCA loadings
+oblimin_spca_congruence_matrix <- compute_congruence_matrix(efa_oblimin_loadings, spca_loadings)
+
+# Print original congruence matrix rounded
+cat("Original Congruence Matrix (EFA Oblimin vs SPCA):\n")
+print(round(oblimin_spca_congruence_matrix, 2))
+
+# Use absolute values for matching (ignore sign)
+abs_congruence <- abs(oblimin_spca_congruence_matrix)
+
+# Hungarian algorithm for optimal matching
+assignment <- solve_LSAP(abs_congruence, maximum = TRUE)
+
+# Print assignment vector (which SPCA component matches each EFA factor)
+cat("\nOptimal matching of SPCA components to EFA Oblimin factors:\n")
+print(assignment)
+
+# Reorder columns of congruence matrix according to assignment
+congruence_matrix_reordered <- oblimin_spca_congruence_matrix[, assignment]
+
+# Rename columns to reflect reordered SPCA components
+colnames(congruence_matrix_reordered) <- paste0("C_", assignment)
+
+# Print reordered congruence matrix rounded
+cat("\nReordered Congruence Matrix (Optimal Matching):\n")
+print(round(congruence_matrix_reordered, 2))
+
+# Melt for ggplot2
+congruence_df <- melt(abs(congruence_matrix_reordered))  # Use abs for heatmap colors
+colnames(congruence_df) <- c("EFA_Oblimin_Factor", "SPCA_Component", "Abs_Congruence")
+
+# Plot heatmap
+ggplot(congruence_df, aes(x = SPCA_Component, y = EFA_Oblimin_Factor, fill = Abs_Congruence)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient(low = "white", high = "red", limits = c(0, 1), name = "Absolute Congruence") +
+  geom_text(aes(label = round(Abs_Congruence, 2)), size = 4, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(#title = "EFA (Oblimin) vs Sparse PCA Congruence Coefficients",
+       x = "SPCA Components",
+       y = "EFA (Oblimin) Factors")
+
+```
+
+
+
+```{r}
+congruence_oblimin_spca <- ggplot(congruence_df, aes(x = SPCA_Component, y = EFA_Oblimin_Factor, fill = Abs_Congruence)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient(low = "white", high = "red", limits = c(0, 1), name = "Absolute Congruence") +
+  geom_text(aes(label = round(Abs_Congruence, 2)), size = 4, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(#title = "EFA Oblimin vs Sparse PCA Congruence Coefficients",
+       x = "SPCA Components",
+       y = "EFA (Oblimin) Factors")
+print(congruence_oblimin_spca)
+ggsave("D:/AIMS-ESSAY-BLOCK/articles/simulation-study-pca-spca-efa/big-five-data/plots/congruence_oblimin_spca2.png", plot = congruence_oblimin_spca, width = 7, height = 5, dpi = 300)
+```
+
+
+
+############EFA_VARIMAX AND EFA_OBLIMIN
+
+
+```{r}
+# Install clue package if not installed
+library(clue)
+library(reshape2)
+library(ggplot2)
+
+# Define function to compute congruence coefficients between EFA and PCA factors
+compute_congruence_matrix <- function(efa_oblimin_loadings, efa_varimax_loadings) {
+  # Ensure inputs are matrices
+  efa_oblimin_loadings <- as.matrix(efa_oblimin_loadings)
+  efa_varimax_loadings <- as.matrix(efa_varimax_loadings)
+  
+  # Check dimensions
+  if (nrow(efa_oblimin_loadings) != nrow(efa_varimax_loadings)) {
+    stop("EFA and PCA loadings must have the same number of variables (rows).")
+  }
+  
+  # Initialize congruence matrix
+  n_efa_oblimin <- ncol(efa_oblimin_loadings)
+  n_efa_varimax <- ncol(efa_varimax_loadings)
+  congruence_matrix <- matrix(NA, nrow = n_efa_oblimin, ncol = n_efa_varimax)
+  
+  # Compute congruence for each EFA-PCA factor pair
+  for (i in 1:n_efa_oblimin) {
+    for (j in 1:n_efa_varimax) {
+      # Extract factor vectors
+      efa_oblimin_factor <- efa_oblimin_loadings[, i]
+      efa_varimax_factor <- efa_varimax_loadings[, j]
+      
+      # Compute congruence coefficient (Tucker’s Phi)
+      numerator <- sum(efa_oblimin_factor * efa_varimax_factor)
+      denominator <- sqrt(sum(efa_oblimin_factor^2)) * sqrt(sum(efa_varimax_factor^2))
+      congruence_matrix[i, j] <- numerator / denominator
+    }
+  }
+  
+  # Add labels
+  rownames(congruence_matrix) <- paste0("F_", 1:n_efa_oblimin)
+  colnames(congruence_matrix) <- paste0("F_", 1:n_efa_varimax)
+  
+  return(congruence_matrix)
+}
+
+# Replace `efa_loadings` and `pca_loadings` congruence
+oblimin_vaimax_congruence_matrix <- compute_congruence_matrix(efa_oblimin_loadings, efa_varimax_loadings)
+
+# Print results (rounded to 2 decimals)
+print(round(oblimin_vaimax_congruence_matrix, 2))
+
+
+# Use absolute values for matching (ignore sign)
+abs_congruence <- abs(oblimin_vaimax_congruence_matrix)
+
+# Hungarian algorithm to find optimal matching (maximize total congruence)
+assignment <- solve_LSAP(abs_congruence, maximum = TRUE)
+
+# assignment is a vector: ith oblimin factor matched to assignment[i] varimax factor
+print(assignment)
+
+# Reorder columns of congruence matrix according to optimal assignment
+congruence_matrix_reordered <- oblimin_vaimax_congruence_matrix[, assignment]
+
+# Rename columns to reflect reordered factors
+colnames(congruence_matrix_reordered) <- paste0("F_", assignment)
+
+# Print reordered congruence matrix rounded
+print(round(congruence_matrix_reordered, 2))
+
+# Melt the reordered matrix for ggplot
+congruence_df <- melt(congruence_matrix_reordered)
+colnames(congruence_df) <- c("EFA_Oblimin", "EFA_Varimax", "Congruence")
+
+# Heatmap plot
+ggplot(congruence_df, aes(x = EFA_Varimax, y = EFA_Oblimin, fill = Congruence)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient(low = "white", high = "red", limits = c(0, 1), name = "Absolute Congruence") +
+  geom_text(aes(label = round(Congruence, 2)), color = "black", size = 4) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "EFA Oblimin vs Varimax Congruence Coefficients",
+       x = "EFA Varimax Factors",
+       y = "EFA Oblimin Factors")
+
+```
+
+###SAVE PLOTS
+
+```{r}
+congruence_oblimin_varimax <- ggplot(congruence_df, aes(x = EFA_Varimax, y = EFA_Oblimin, fill = Congruence)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient(low = "white", high = "red", limits = c(0, 1), name = "Absolute Congruence") +
+  geom_text(aes(label = round(Congruence, 2)), color = "black", size = 4) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "EFA Oblimin vs Varimax Congruence Coefficients",
+       x = "EFA Varimax Factors",
+       y = "EFA Oblimin Factors")
+print(congruence_oblimin_varimax)
+ggsave("D:/AIMS-ESSAY-BLOCK/articles/simulation-study-pca-spca-efa/big-five-data/plots/congruence_oblimin_varimax.png", plot = congruence_oblimin_varimax, width = 7, height = 5, dpi = 300)
+
+```
+
+
+####pca vs spca
+
+```{r}
+library(clue)
+library(reshape2)
+library(ggplot2)
+
+# Function to compute congruence coefficients (Tucker's phi)
+compute_congruence_matrix <- function(pca_varimax_loadings, spca_loadings) {
+  pca_varimax_loadings <- as.matrix(pca_varimax_loadings)
+  spca_loadings <- as.matrix(spca_loadings)
+  
+  if (nrow(pca_varimax_loadings) != nrow(spca_loadings)) {
+    stop("EFA Oblimin and SPCA loadings must have the same number of variables (rows).")
+  }
+  
+  n_pca <- ncol(pca_varimax_loadings)
+  n_spca <- ncol(spca_loadings)
+  congruence_matrix <- matrix(NA, nrow = n_pca, ncol = n_spca)
+  
+  for (i in 1:n_pca) {
+    for (j in 1:n_spca) {
+      pca_factor <- pca_varimax_loadings[, i]
+      spca_factor <- spca_loadings[, j]
+      
+      numerator <- sum(pca_factor * spca_factor)
+      denominator <- sqrt(sum(pca_factor^2)) * sqrt(sum(spca_factor^2))
+      congruence_matrix[i, j] <- numerator / denominator
+    }
+  }
+  
+  rownames(congruence_matrix) <- paste0("C_", 1:n_pca)
+  colnames(congruence_matrix) <- paste0("C_", 1:n_spca)
+  
+  return(congruence_matrix)
+}
+
+# Compute congruence matrix between EFA Oblimin and SPCA loadings
+pca_spca_congruence_matrix <- compute_congruence_matrix(pca_varimax_loadings, spca_loadings)
+
+# Print original congruence matrix rounded
+cat("Original Congruence Matrix (EFA Oblimin vs SPCA):\n")
+print(round(pca_spca_congruence_matrix, 2))
+
+# Use absolute values for matching (ignore sign)
+abs_congruence <- abs(pca_spca_congruence_matrix)
+
+# Hungarian algorithm for optimal matching
+assignment <- solve_LSAP(abs_congruence, maximum = TRUE)
+
+# Print assignment vector (which SPCA component matches each EFA factor)
+cat("\nOptimal matching of SPCA components to EFA Oblimin factors:\n")
+print(assignment)
+
+# Reorder columns of congruence matrix according to assignment
+congruence_matrix_reordered <- pca_spca_congruence_matrix[, assignment]
+
+# Rename columns to reflect reordered SPCA components
+colnames(congruence_matrix_reordered) <- paste0("C_", assignment)
+
+# Print reordered congruence matrix rounded
+cat("\nReordered Congruence Matrix (Optimal Matching):\n")
+print(round(congruence_matrix_reordered, 2))
+
+# Melt for ggplot2
+congruence_df <- melt(abs(congruence_matrix_reordered))  # Use abs for heatmap colors
+colnames(congruence_df) <- c("PCA_Component", "SPCA_Component", "Abs_Congruence")
+
+# Plot heatmap
+ggplot(congruence_df, aes(x = SPCA_Component, y = PCA_Component, fill = Abs_Congruence)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient(low = "white", high = "red", limits = c(0, 1), name = "Absolute Congruence") +
+  geom_text(aes(label = round(Abs_Congruence, 2)), size = 4, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "PCA (varimax) vs Sparse PCA Congruence Coefficients",
+       x = "SPCA Components",
+       y = "PCA (Varimax) Components")
+
+```
+
+```{r}
+congruence_pca_spca <- ggplot(congruence_df, aes(x = SPCA_Component, y = PCA_Component, fill = Abs_Congruence)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient(low = "white", high = "red", limits = c(0, 1), name = "Absolute Congruence") +
+  geom_text(aes(label = round(Abs_Congruence, 2)), size = 4, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(#title = "PCA (Varimax) vs Sparse PCA Congruence Coefficients",
+       x = "SPCA Components",
+       y = "PCA (Varimax) Components")
+
+print(congruence_pca_spca)
+ggsave("D:/AIMS-ESSAY-BLOCK/articles/simulation-study-pca-spca-efa/big-five-data/plots/congruence_pca_spca2.png", plot = congruence_pca_spca, width = 7, height = 5, dpi = 300)
+```
+
+
+#######################factor score correlations#############
+
+```{r}
+library(dplyr)
+library(tibble)
+library(flextable)
+
+# 1. Extract the loadings matrix as numeric matrix
+loadings_mat <- as.matrix(efa_oblimin$loadings)
+
+# 2. Round loadings and suppress small values (e.g., < 0.3)
+cutoff <- 0.3
+loadings_clean <- round(loadings_mat, 3)
+loadings_clean[abs(loadings_clean) < cutoff] <- NA  # suppress small loadings
+
+# 3. Convert to data frame and add item names as a column
+loadings_df <- as.data.frame(loadings_clean) %>%
+  rownames_to_column(var = "Item")
+
+# 4. Add SS loadings, proportion variance, and cumulative variance as additional rows
+ss_loadings <- round(efa_oblimin$e.values, 3)  # eigenvalues (sum of squared loadings)
+prop_var <- round(efa_oblimin$Vaccounted["Proportion Var", ], 3)
+cum_var <- round(efa_oblimin$Vaccounted["Cumulative Var", ], 3)
+
+# Create a summary row data frame
+summary_df <- data.frame(
+  Item = c("SS loadings", "Proportion Var", "Cumulative Var"),
+  rbind(ss_loadings, prop_var, cum_var)
+)
+
+# 5. Bind summary rows to loadings
+final_df <- bind_rows(loadings_df, summary_df)
+
+# 6. Create a flextable for nice formatting
+ft <- flextable(final_df) %>%
+  set_caption("Factor Loadings from EFA with Oblimin Rotation") %>%
+  autofit() %>%
+  theme_zebra() %>%
+  align(j = 2:ncol(final_df), align = "center", part = "all")
+
+# 7. Print the table
+ft
+
+# Optional: save as Word document
+# save_as_docx(ft, path = "efa_oblimin_factor_loadings.docx")
+
+ 
+
+
+# Create a publication-ready flextable (nice formatting)
+
+# Optionally save as Word document
+# save_as_docx(ft, path = "efa_oblimin_factor_loadings.docx")
+
+```
+
+
+
+
+```{r}
+# 5.3 Compare factor score correlations
+pca_scores <- as.matrix(pca_scores)
+spca_scores <- as.matrix(spca_scores)
+efa_varimax_scores <- as.matrix(efa_varimax$scores)
+efa_oblimin_scores <- as.matrix(efa_oblimin$scores)
+
+# Reorder scores based on matched factors
+#spca_scores_reordered <- spca_scores[, spca_matching]
+efa_varimax_scores_reordered <- efa_varimax_scores[, efa_varimax_matching]
+efa_oblimin_scores_reordered <- efa_oblimin_scores[, efa_oblimin_matching]
+
+# Calculate correlations between matched factor scores
+cor_with_pca_spca <- diag(cor(pca_scores, spca_scores_reordered))
+cor_with_pca_efa_varimax <- diag(cor(pca_scores, efa_varimax_scores_reordered))
+cor_with_pca_efa_oblimin <- diag(cor(pca_scores, efa_oblimin_scores_reordered))
+
+cat("\nCorrelation between matched factor scores:\n")
+score_cor_df <- data.frame(
+  Factor = 1:n_factors,
+  SparsePCA = cor_with_pca_spca,
+  EFA_Varimax = cor_with_pca_efa_varimax,
+  EFA_Oblimin = cor_with_pca_efa_oblimin
+)
+print(score_cor_df)
+```
+
+
+
+
+
+```{r}
+#############################################
+# 5. COMPARISON OF METHODS
+#############################################
+
+# 5.1 Compare reconstruction error
+recon_errors <- c(
+  PCA_Varimax = pca_mse,
+  Sparse_PCA = spca_mse,
+  EFA_Varimax = efa_varimax_mse,
+  EFA_Oblimin = efa_oblimin_mse
+)
+
+cat("\nReconstruction errors (MSE):\n")
+print(recon_errors)
+```
+
+
+```{r}
+
+# 5.2 Compare factor loadings patterns
+
+# Function to find factor correspondence for comparison
+match_factors <- function(loadings1, loadings2) {
+  # Calculate correlation matrix between loadings
+  cor_matrix <- cor(loadings1, loadings2)
+  
+  # Find best matching factors
+  matching <- rep(NA, ncol(loadings1))
+  for (i in 1:ncol(loadings1)) {
+    best_match <- which.max(abs(cor_matrix[, i]))
+    matching[i] <- best_match
+  }
+  
+  return(matching)
+}
+
+# Match factors across methods using PCA as reference
+pca_factors <- pca_varimax_loadings
+spca_matching <- match_factors(pca_factors, spca_loadings)
+efa_varimax_matching <- match_factors(pca_factors, loadings(efa_varimax))
+efa_oblimin_matching <- match_factors(pca_factors, loadings(efa_oblimin))
+
+# Calculate congruence coefficients between matched factors
+calc_congruence <- function(loadings1, loadings2, matching) {
+  congruence <- numeric(ncol(loadings1))
+  
+  for (i in 1:ncol(loadings1)) {
+    v1 <- loadings1[, i]
+    v2 <- loadings2[, matching[i]]
+    congruence[i] <- sum(v1 * v2) / (sqrt(sum(v1^2)) * sqrt(sum(v2^2)))
+  }
+  
+  return(congruence)
+}
+
+spca_congruence <- calc_congruence(pca_factors, spca_loadings, spca_matching)
+efa_varimax_congruence <- calc_congruence(pca_factors, loadings(efa_varimax), efa_varimax_matching)
+efa_oblimin_congruence <- calc_congruence(pca_factors, loadings(efa_oblimin), efa_oblimin_matching)
+
+cat("\nCongruence coefficients with PCA factors:\n")
+congruence_df <- data.frame(
+  Factor = 1:n_factors,
+  SparsePCA = spca_congruence,
+  EFA_Varimax = efa_varimax_congruence,
+  EFA_Oblimin = efa_oblimin_congruence
+)
+print(congruence_df)
+
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+#############################################
+# 6. VISUALIZATIONS
+#############################################
+
+# 6.1 Heatmap of factor loadings for each method
+visualize_loadings <- function(loadings, title) {
+  # Convert loadings to data frame for ggplot
+  if (class(loadings)[1] == "loadings") {
+    load_df <- as.data.frame(unclass(loadings))
+  } else {
+    load_df <- as.data.frame(loadings)
+  }
+  
+  # Set column names
+  colnames(load_df) <- paste0("Factor", 1:ncol(load_df))
+  load_df$Variable <- rownames(load_df)
+  
+  # Reshape for plotting
+  load_melted <- reshape2::melt(load_df, id.vars = "Variable",
+                              variable.name = "Factor", value.name = "Loading")
+  
+  # Plot
+  p <- ggplot(load_melted, aes(x = Factor, y = Variable, fill = Loading)) +
+    geom_tile() +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", 
+                        midpoint = 0, limits = c(-1, 1)) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+          axis.text.y = element_text(size = 8),
+          plot.title = element_text(hjust = 0.5)) +
+    labs(title = title, x = "", y = "")
+  
+  return(p)
+}
+
+# Create heatmaps
+pca_heatmap <- visualize_loadings(pca_varimax_loadings, "PCA with Varimax Rotation")
+spca_heatmap <- visualize_loadings(spca_loadings, "Sparse PCA")
+efa_varimax_heatmap <- visualize_loadings(loadings(efa_varimax), "EFA with Varimax Rotation")
+efa_oblimin_heatmap <- visualize_loadings(loadings(efa_oblimin), "EFA with Oblimin Rotation")
+
+# Save plots
+#pdf("factor_loading_heatmaps.pdf", width = 12, height = 15)
+#grid.arrange(pca_heatmap, spca_heatmap, efa_varimax_heatmap, efa_oblimin_heatmap, 
+            # ncol = 2)
+#dev.off()
+
+print(pca_heatmap)
+print(spca_heatmap)
+print(efa_varimax_heatmap)
+print(efa_oblimin_heatmap)
+```
+
+
+```{r}
+# 6.2 Bar plot of reconstruction errors
+recon_df <- data.frame(
+  Method = names(recon_errors),
+  MSE = as.numeric(recon_errors)
+)
+
+recon_plot <- ggplot(recon_df, aes(x = Method, y = MSE, fill = Method)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Reconstruction Error by Method", y = "Mean Squared Error", x = "")
+
+# Save plot
+pdf("reconstruction_error_plot.pdf", width = 8, height = 6)
+print(recon_plot)
+dev.off()
+
+# 6.3 Factor score correlation heatmap
+score_cor_melted <- reshape2::melt(score_cor_df, id.vars = "Factor", 
+                                 variable.name = "Method", value.name = "Correlation")
+
+cor_plot <- ggplot(score_cor_melted, aes(x = Method, y = as.factor(Factor), fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "forestgreen", limits = c(0, 1)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Factor Score Correlations (vs. PCA)", x = "", y = "Factor")
+
+# Save plot
+#pdf("factor_score_correlation_plot.pdf", width = 8, height = 6)
+print(cor_plot)
+#dev.off()
+```
+
+
+```{r}
+cong_matrix <- factor.congruence(spca_loadings, pca_loadings)
+
+# Print the matrix
+print(round(cong_matrix, 3))
+
+```
+
+
+
+```{r}
+# 7.2 Final summary statistics
+cat("\n====== SUMMARY OF COMPARISON ======\n")
+cat("Number of variables:", ncol(bfi_scaled), "\n")
+cat("Number of observations:", nrow(bfi_scaled), "\n")
+cat("Number of factors extracted:", n_factors, "\n\n")
+
+cat("Method Comparison:\n")
+cat("1. Reconstruction Error (lower is better):\n")
+for (i in 1:length(recon_errors)) {
+  cat("  ", names(recon_errors)[i], ":", round(recon_errors[i], 4), "\n")
+}
+
+cat("\n2. Average Congruence with PCA factors (higher is better):\n")
+cat("  Sparse PCA:", round(mean(spca_congruence), 4), "\n")
+cat("  EFA Varimax:", round(mean(efa_varimax_congruence), 4), "\n")
+cat("  EFA Oblimin:", round(mean(efa_oblimin_congruence), 4), "\n")
+
+cat("\n3. Average Factor Score Correlation with PCA (higher is better):\n")
+cat("  Sparse PCA:", round(mean(cor_with_pca_spca), 4), "\n")
+cat("  EFA Varimax:", round(mean(cor_with_pca_efa_varimax), 4), "\n")
+cat("  EFA Oblimin:", round(mean(cor_with_pca_efa_oblimin), 4), "\n")
+
+cat("\n4. Sparsity (proportion of non-zero loadings):\n")
+pca_nonzero <- sum(abs(pca_varimax_loadings) > 0.1) / length(pca_varimax_loadings)
+efa_varimax_nonzero <- sum(abs(loadings(efa_varimax)) > 0.1) / length(loadings(efa_varimax))
+efa_oblimin_nonzero <- sum(abs(loadings(efa_oblimin)) > 0.1) / length(loadings(efa_oblimin))
+
+cat("  PCA Varimax:", round(pca_nonzero, 4), "\n")
+cat("  Sparse PCA:", round(spca_nonzero, 4), "\n")
+cat("  EFA Varimax:", round(efa_varimax_nonzero, 4), "\n")
+cat("  EFA Oblimin:", round(efa_oblimin_nonzero, 4), "\n")
+
+cat("\n====== CONCLUSION ======\n")
+cat("This analysis compared three methods (PCA, Sparse PCA, and EFA) for uncovering the")
+cat(" latent structure of Big Five personality data. The methods differ in their")
+cat(" assumptions and constraints, leading to different identified factor structures.\n\n")
+
+cat("Overall, the empirical results align with the simulation study findings,")
+cat(" showing differences in reconstruction error, sparsity, and factor recovery.")
+cat(" The choice of method depends on the specific research goals: PCA optimizes for")
+cat(" variance explained, Sparse PCA produces more interpretable loadings, and EFA")
+cat(" with different rotations can model different factor correlation structures.\n")
+```
+
+```{r}
+library(qgraph)
+library(elasticnet)
+
+# Load Big Five data
+data(big5)
+data(big5groups)
+
+# Create 500x30 subset (random rows, all 30 items)
+set.seed(123)
+subset_data <- big5[sample(nrow(big5), 500), 1:30]  # First 30 items
+bfi_scaled <- scale(subset_data)  # Standardize
+
+# Function for cross-validated lambda selection
+cv_spca <- function(lambda) {
+  folds <- 5
+  fold_ids <- sample(rep(1:folds, length.out = nrow(bfi_scaled)))
+  mse <- numeric(folds)
+  
+  for (fold in 1:folds) {
+    train <- bfi_scaled[fold_ids != fold, ]
+    test <- bfi_scaled[fold_ids == fold, ]
+    
+    spca_fit <- elasticnet::spca(
+      x = cor(train),
+      K = 5,
+      para = rep(lambda, ncol(train)),
+      type = "Gram",
+      sparse = "penalty"
+    )
+    
+    # Reconstruction error
+    scores <- test %*% spca_fit$loadings
+    recon <- scores %*% t(spca_fit$loadings)
+    mse[fold] <- mean((test - recon)^2)
+  }
+  mean(mse)
+}
+
+# Test lambda values
+lambda_values <- seq(0.05, 0.3, by = 0.05)
+cv_errors <- sapply(lambda_values, cv_spca)
+
+# Optimal lambda
+optimal_lambda <- lambda_values[which.min(cv_errors)]
+cat("Optimal lambda:", optimal_lambda, "\n")
+```
+###########################
+
+
+```{r}
+
+```
+
+
+```{r}
+
+
+
+
+```
+
+
+
+
+
